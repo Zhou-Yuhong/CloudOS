@@ -19,7 +19,7 @@ rdt_receiver.o:	rdt_struct.h rdt_receiver.h
 rdt_sim.o: 	rdt_struct.h
 
 rdt_sim: rdt_sim.o rdt_sender.o rdt_receiver.o
-	g++ $(LDFLAGS) -o $@ $^
+	g++ $(LDFLAGS) -o $@ $^ -lpthread
 
 clean:
 	rm -f *~ *.o $(TARGETS)
