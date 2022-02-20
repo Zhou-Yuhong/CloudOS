@@ -41,6 +41,8 @@ void sendMsg(){
             packet pac = buffer.front();
             buffer.pop();
             int place = nextseqnum % WINDOW_SIZE;
+            //fill the information of nextseqnum and checksum
+            make_pkt2(nextseqnum,pac);
             window[place] = pac;
             Sender_ToLowerLayer(window + place);
             if(base == nextseqnum) Sender_StartTimer(TIME_OUT);
@@ -70,6 +72,13 @@ void Sender_Init()
 void Sender_Final()
 {
     fprintf(stdout, "At %.2fs: sender finalizing ...\n", GetSimulationTime());
+    if(window){
+        delete window;
+    }
+    if(background_send){
+        delete background_send;
+    }
+
 }
 
 
@@ -84,8 +93,20 @@ void Sender_FromUpperLayer(struct message *msg)
     mtx.lock();
     int num = msg->size / maxpayload_size;
     num = (msg->size % maxpayload_size) == 0 ? num : num + 1;
+    char* pos = msg->data;
+    int offset = 0;
     for(int i = 0; i < num; i++){
-
+        if(i == num -1){
+            //the last one
+            packet pac = make_pkt1(pos, true, msg->size - offset);
+            buffer.push(pac);
+        }
+        else{
+            packet pac = make_pkt1(pos, false);
+            offset += 118;
+            pos += 118;
+            buffer.push(pac);
+        }
     }
     mtx.unlock();
     
@@ -120,20 +141,58 @@ void Sender_FromUpperLayer(struct message *msg)
 	// Sender_ToLowerLayer(&pkt);
     // }
 }
-
+bool notCorrupt(packet pac){
+    unsigned char checkResult = 0;
+    unsigned char *pos = (unsigned char*)pac.data;
+    for(int i = 0; i < 6; i++){
+        checkResult += pos[i];
+    }
+    if(!checkResult){
+        return true;
+    }
+    return false;
+}
+int getAckNum(packet pac){
+    int ackNum;
+    char* p = pac.data;
+    memcpy(&ackNum, p, sizeof(int));
+    return ackNum;
+}
 /* event handler, called when a packet is passed from the lower layer at the 
    sender */
 void Sender_FromLowerLayer(struct packet *pkt)
 {
+    //first copy the packet
+    mtx.lock();
+    packet pac;
+    char *dst = pac.data;
+    char *src = pkt->data;
+    memcpy(dst, src, 6);
+    if(notCorrupt(pac)){
+        base = getAckNum(pac) + 1;
+        if(base == nextseqnum){
+            Sender_StopTimer();
+        }else{
+            Sender_StartTimer(TIME_OUT);
+        }
+    }
+    mtx.unlock();
 }
 
 /* event handler, called when the timer expires */
 void Sender_Timeout()
 {
+    mtx.lock();
+    Sender_StartTimer(TIME_OUT);
+    for(int i = base; i < nextseqnum; i++){
+        int offset = i % WINDOW_SIZE;
+        Sender_ToLowerLayer(window + offset);
+    }
+    mtx.unlock();
 }
 
 //the struct of packet is:
-// nextseqnum|isEnd|length of data|data|checksum
+// nextseqnum|isEnd|length of data|data|checksum 
 // the form of pkt should divide into 2 steps, first is split msg into multi pkt, second is fill the nextseqnum, checksum
 packet make_pkt1(char* data, bool isEnd = true,int length = 118){
     //first caculate the checksum
@@ -170,5 +229,5 @@ void make_pkt2(int nextseqnum, packet& pac){
     checksum = ~checksum;
     checksum++;
     p += 127;
-    memcpy(p, checksum, sizeof(checksum));
+    memcpy(p, &checksum, sizeof(checksum));
 }
