@@ -14,9 +14,9 @@
 
 int expectedseqnum;
 packet sndpkt;
-std::vector<packet> buffer; //buffer to store packets that can form a message
+std::vector<packet> reciverBuffer; //reciverBuffer to store packets that can form a message
 /* receiver initialization, called once at the very beginning */
-bool notCorrupt(packet pac){
+bool notCorrupt2(packet pac){
     //check if the pac reciver is complete based on checksum
     unsigned char checkResult = 0;
     unsigned char *pos = (unsigned char *)pac.data;
@@ -28,7 +28,26 @@ bool notCorrupt(packet pac){
     }
     return false;
 }
+void make_pkt(packet &pac,int expectedseqnum,bool ACK = true){
+    // the struct of pac sent by receiver side is
+    // int expectedseqnum | bool ACK|char checksum
+    char* pos = pac.data;
+    memcpy(pos, &expectedseqnum, sizeof(expectedseqnum));
+    pos += sizeof(expectedseqnum);
+    memcpy(pos, &ACK, sizeof(ACK));
+    pos += sizeof(ACK);
+    //form the checksum
+    unsigned char* p = (unsigned char*)(pac.data);
+    unsigned char checksum = 0;
+    for(int i = 0; i < 5; i++){
+        checksum += p[i];
+    }
+    checksum = ~checksum;
+    checksum++;
+    p += 5;
+    memcpy(p, &checksum, sizeof(checksum));
 
+}
 void decoding(packet pac, int &seqnum, bool &isEnd){
     char *p = pac.data;
     memcpy(&seqnum, p, sizeof(seqnum));
@@ -50,12 +69,12 @@ void Receiver_Init()
 
 }
 message formMsg(){
-    //form a message from the buffer
+    //form a message from the reciverBuffer
     message msg;
     //first calculate the totle size of message
     int size = 0;
     std::queue<int> lenGroup;
-    for(auto it:buffer){
+    for(auto it:reciverBuffer){
         int tmp = getDataLength(it);
         lenGroup.push(tmp);
         size += tmp;
@@ -64,7 +83,7 @@ message formMsg(){
     msg.size = size;
     msg.data = new char[size];
     char *p = msg.data;
-    for(auto it:buffer){
+    for(auto it:reciverBuffer){
         int tmp = lenGroup.front();
         lenGroup.pop();
         char *pos = it.data;
@@ -72,8 +91,8 @@ message formMsg(){
         memcpy(p, pos, tmp);
         p += tmp;
     } 
-    //clear buffer
-    buffer.clear();
+    //clear reciverBuffer
+    reciverBuffer.clear();
     return msg;
 }
 /* receiver finalization, called once at the very end.
@@ -94,12 +113,12 @@ void Receiver_FromLowerLayer(struct packet *pkt)
     char* dst = pac.data;
     char* src = pkt->data;
     memcpy(dst, src, 128);
-    if(notCorrupt(pac)){
+    if(notCorrupt2(pac)){
         int seqnum;
         bool isEnd;
         decoding(pac, seqnum, isEnd);
         if(seqnum == expectedseqnum){
-            buffer.push_back(pac);
+            reciverBuffer.push_back(pac);
             if(isEnd){
                message msg = formMsg();
                Receiver_ToUpperLayer(&msg); 
@@ -139,23 +158,4 @@ void Receiver_FromLowerLayer(struct packet *pkt)
     // if (msg->data!=NULL) free(msg->data);
     // if (msg!=NULL) free(msg);
 }
-void make_pkt(packet &pac,int expectedseqnum,bool ACK = true){
-    // the struct of pac sent by receiver side is
-    // int expectedseqnum | bool ACK|char checksum
-    char* pos = pac.data;
-    memccpy(pos, &expectedseqnum, sizeof(expectedseqnum));
-    pos += sizeof(expectedseqnum);
-    memcpy(pos, &ACK, sizeof(ACK));
-    pos += sizeof(ACK);
-    //form the checksum
-    unsigned char* p = (unsigned char*)(pac.data);
-    unsigned char checksum = 0;
-    for(int i = 0; i < 5; i++){
-        checksum += p[i];
-    }
-    checksum = ~checksum;
-    checksum++;
-    p += 5;
-    memcpy(p, &checksum, sizeof(checksum));
 
-}

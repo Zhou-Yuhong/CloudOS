@@ -20,22 +20,68 @@
 #include <string.h>
 #include <queue>
 #include <thread>
+#include <iostream>
 #include "rdt_struct.h"
 #include "rdt_sender.h"
 
-#define WINDOW_SIZE 16
+#define WINDOW_SIZE 10
 #define TIME_OUT 1
 int base,nextseqnum;
+bool lockDebug = false;
+int WAIT_FOR_FINAL = 0;
+int CALL_FINAL = 1;
+int REAL_FIANL = 2;
+int finalStatus = WAIT_FOR_FINAL;
 //use to store the message from upper(transform to packet,since a message may form more than one packet)
 std::queue<packet> buffer; 
 packet* window = nullptr;
 std::mutex mtx;
 std::thread* background_send = nullptr;
 /* sender initialization, called once at the very beginning */
+//the struct of packet is:
+// nextseqnum|isEnd|length of data|data|checksum 
+// the form of pkt should divide into 2 steps, first is split msg into multi pkt, second is fill the nextseqnum, checksum
+packet make_pkt1(char* data, bool isEnd = true,int length = 118){
+    //first caculate the checksum
+    // unsigned char checksum = 0;
+    // unsigned char* pos = (unsigned char*)data;
+    // for(int i=0;i<length;i++){
+    //     checksum += pos[i];
+    // }
+    // checksum = ~checksum;
+    // checksum++;
 
+    //fill the packet
+    packet result;
+    char* p = (char*)(result.data);
+    // memcpy(p, (char*)(&nextseqnum), sizeof(int));
+    p += sizeof(int);
+    memcpy(p, &isEnd, sizeof(bool));
+    p += sizeof(bool);
+    memcpy(p, &length, sizeof(length));
+    p += sizeof(length);
+    memcpy(p, data, length);
+    return result;
+}
+void make_pkt2(int nextseqnum, packet& pac){
+    //form the checksum
+    char* p = (char*)(pac.data);
+    memcpy(p, &nextseqnum, sizeof(int));
+    //form the checksum
+    unsigned char* pos = (unsigned char*)(pac.data);
+    unsigned char checksum = 0;
+    for(int i = 0; i < 127; i++){
+        checksum += pos[i];
+    }
+    checksum = ~checksum;
+    checksum++;
+    p += 127;
+    memcpy(p, &checksum, sizeof(checksum));
+}
 void sendMsg(){
     while(true){
         mtx.lock();
+        if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
         while(nextseqnum < base + WINDOW_SIZE && !buffer.empty()){
             //get the message
             packet pac = buffer.front();
@@ -44,12 +90,18 @@ void sendMsg(){
             //fill the information of nextseqnum and checksum
             make_pkt2(nextseqnum,pac);
             window[place] = pac;
+            //std::cout<<"send message at time "<<GetSimulationTime()<<std::endl;
             Sender_ToLowerLayer(window + place);
             if(base == nextseqnum) Sender_StartTimer(TIME_OUT);
             nextseqnum++;
         }
+        if(finalStatus == CALL_FINAL && buffer.empty()) {
+            //finalStatus = REAL_FIANL;
+            mtx.unlock();
+            return;
+        }
+        if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
         mtx.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }   
 }
 
@@ -71,13 +123,30 @@ void Sender_Init()
    memory you allocated in Sender_init(). */
 void Sender_Final()
 {
+    mtx.lock();
     fprintf(stdout, "At %.2fs: sender finalizing ...\n", GetSimulationTime());
-    if(window){
-        delete window;
+    finalStatus = CALL_FINAL;
+    mtx.unlock();
+    while(true){
+        mtx.lock();
+        if(buffer.empty()){
+            mtx.unlock();
+            return;
+        }
+        // std::cout<<"aaaaaa"<<std::endl;
+        // if(finalStatus == REAL_FIANL){
+        //     mtx.unlock();
+        //     return;
+        // }
+        mtx.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if(background_send){
-        delete background_send;
-    }
+    // std::cout<<"1111"<<std::endl;
+    // background_send->join();
+    // if(background_send){
+    //     delete background_send;
+    // }
+    //std::cout<<"2222"<<std::endl;
 
 }
 
@@ -91,6 +160,7 @@ void Sender_FromUpperLayer(struct message *msg)
     int maxpayload_size = 118;
     //fill the buffer
     mtx.lock();
+    if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
     int num = msg->size / maxpayload_size;
     num = (msg->size % maxpayload_size) == 0 ? num : num + 1;
     char* pos = msg->data;
@@ -108,6 +178,7 @@ void Sender_FromUpperLayer(struct message *msg)
             buffer.push(pac);
         }
     }
+    if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
     mtx.unlock();
     
     
@@ -164,6 +235,7 @@ void Sender_FromLowerLayer(struct packet *pkt)
 {
     //first copy the packet
     mtx.lock();
+    if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
     packet pac;
     char *dst = pac.data;
     char *src = pkt->data;
@@ -176,6 +248,7 @@ void Sender_FromLowerLayer(struct packet *pkt)
             Sender_StartTimer(TIME_OUT);
         }
     }
+    if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
     mtx.unlock();
 }
 
@@ -183,51 +256,14 @@ void Sender_FromLowerLayer(struct packet *pkt)
 void Sender_Timeout()
 {
     mtx.lock();
+    if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
+    std::cout<<"time out"<<std::endl;
     Sender_StartTimer(TIME_OUT);
     for(int i = base; i < nextseqnum; i++){
         int offset = i % WINDOW_SIZE;
         Sender_ToLowerLayer(window + offset);
     }
+    if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
     mtx.unlock();
 }
 
-//the struct of packet is:
-// nextseqnum|isEnd|length of data|data|checksum 
-// the form of pkt should divide into 2 steps, first is split msg into multi pkt, second is fill the nextseqnum, checksum
-packet make_pkt1(char* data, bool isEnd = true,int length = 118){
-    //first caculate the checksum
-    // unsigned char checksum = 0;
-    // unsigned char* pos = (unsigned char*)data;
-    // for(int i=0;i<length;i++){
-    //     checksum += pos[i];
-    // }
-    // checksum = ~checksum;
-    // checksum++;
-
-    //fill the packet
-    packet result;
-    char* p = (char*)(result.data);
-    // memcpy(p, (char*)(&nextseqnum), sizeof(int));
-    p += sizeof(int);
-    memcpy(p, &isEnd, sizeof(bool));
-    p += sizeof(bool);
-    memcpy(p, &length, sizeof(length));
-    p += sizeof(length);
-    memcpy(p, data, length);
-    return result;
-}
-void make_pkt2(int nextseqnum, packet& pac){
-    //form the checksum
-    char* p = (char*)(pac.data);
-    memcpy(p, &nextseqnum, sizeof(int));
-    //form the checksum
-    unsigned char* pos = (unsigned char*)(pac.data);
-    unsigned char checksum = 0;
-    for(int i = 0; i < 127; i++){
-        checksum += pos[i];
-    }
-    checksum = ~checksum;
-    checksum++;
-    p += 127;
-    memcpy(p, &checksum, sizeof(checksum));
-}
