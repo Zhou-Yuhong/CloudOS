@@ -27,16 +27,10 @@
 #define WINDOW_SIZE 10
 #define TIME_OUT 1
 int base,nextseqnum;
-bool lockDebug = false;
-int WAIT_FOR_FINAL = 0;
-int CALL_FINAL = 1;
-int REAL_FIANL = 2;
-int finalStatus = WAIT_FOR_FINAL;
 //use to store the message from upper(transform to packet,since a message may form more than one packet)
 std::queue<packet> buffer; 
 packet* window = nullptr;
-std::mutex mtx;
-std::thread* background_send = nullptr;
+// std::thread* background_send = nullptr;
 /* sender initialization, called once at the very beginning */
 //the struct of packet is:
 // nextseqnum|isEnd|length of data|data|checksum 
@@ -78,32 +72,7 @@ void make_pkt2(int nextseqnum, packet& pac){
     p += 127;
     memcpy(p, &checksum, sizeof(checksum));
 }
-void sendMsg(){
-    while(true){
-        mtx.lock();
-        if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
-        while(nextseqnum < base + WINDOW_SIZE && !buffer.empty()){
-            //get the message
-            packet pac = buffer.front();
-            buffer.pop();
-            int place = nextseqnum % WINDOW_SIZE;
-            //fill the information of nextseqnum and checksum
-            make_pkt2(nextseqnum,pac);
-            window[place] = pac;
-            //std::cout<<"send message at time "<<GetSimulationTime()<<std::endl;
-            Sender_ToLowerLayer(window + place);
-            if(base == nextseqnum) Sender_StartTimer(TIME_OUT);
-            nextseqnum++;
-        }
-        if(finalStatus == CALL_FINAL && buffer.empty()) {
-            //finalStatus = REAL_FIANL;
-            mtx.unlock();
-            return;
-        }
-        if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
-        mtx.unlock();
-    }   
-}
+
 
 void Sender_Init()
 {
@@ -113,8 +82,6 @@ void Sender_Init()
     }
     base = 1;
     nextseqnum = 1;
-    background_send = new std::thread(&sendMsg);
-
 }
 
 /* sender finalization, called once at the very end.
@@ -123,31 +90,12 @@ void Sender_Init()
    memory you allocated in Sender_init(). */
 void Sender_Final()
 {
-    mtx.lock();
     fprintf(stdout, "At %.2fs: sender finalizing ...\n", GetSimulationTime());
-    finalStatus = CALL_FINAL;
-    mtx.unlock();
-    while(true){
-        mtx.lock();
-        if(buffer.empty()){
-            mtx.unlock();
-            return;
-        }
-        // std::cout<<"aaaaaa"<<std::endl;
-        // if(finalStatus == REAL_FIANL){
-        //     mtx.unlock();
-        //     return;
-        // }
-        mtx.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if(window){
+        delete window;
+        window = nullptr;
     }
-    // std::cout<<"1111"<<std::endl;
-    // background_send->join();
-    // if(background_send){
-    //     delete background_send;
-    // }
-    //std::cout<<"2222"<<std::endl;
-
+    //std::cout << "base = "<<base<<"nextseqnum = "<<nextseqnum<<" buffer size = "<<buffer.size()<<std::endl;
 }
 
 
@@ -155,12 +103,9 @@ void Sender_Final()
    sender */
 void Sender_FromUpperLayer(struct message *msg)
 {
-
-    
     int maxpayload_size = 118;
     //fill the buffer
-    mtx.lock();
-    if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
+    //if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
     int num = msg->size / maxpayload_size;
     num = (msg->size % maxpayload_size) == 0 ? num : num + 1;
     char* pos = msg->data;
@@ -178,8 +123,21 @@ void Sender_FromUpperLayer(struct message *msg)
             buffer.push(pac);
         }
     }
-    if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
-    mtx.unlock();
+    //if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
+    //send message
+    while(nextseqnum < base + WINDOW_SIZE && !buffer.empty()){
+            //get the message
+            packet pac = buffer.front();
+            buffer.pop();
+            int place = nextseqnum % WINDOW_SIZE;
+            //fill the information of nextseqnum and checksum
+            make_pkt2(nextseqnum,pac);
+            window[place] = pac;
+            //std::cout<<"send message at time "<<GetSimulationTime()<<std::endl;
+            Sender_ToLowerLayer(window + place);
+            if(base == nextseqnum) Sender_StartTimer(TIME_OUT);
+            nextseqnum++;
+    }
     
     
     // /* split the message if it is too big */
@@ -234,36 +192,53 @@ int getAckNum(packet pac){
 void Sender_FromLowerLayer(struct packet *pkt)
 {
     //first copy the packet
-    mtx.lock();
-    if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
+    //if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
     packet pac;
     char *dst = pac.data;
     char *src = pkt->data;
     memcpy(dst, src, 6);
     if(notCorrupt(pac)){
-        base = getAckNum(pac) + 1;
+        int seqnum = getAckNum(pac);
+        //std::cout<<"the recive ACK not corrupt, seqnum = "<<seqnum<<" base="<<base<<std::endl;
+        if(seqnum < base - WINDOW_SIZE || seqnum > base + WINDOW_SIZE) return;
+        int oldBase = base; 
+        base = seqnum + 1;
         if(base == nextseqnum){
             Sender_StopTimer();
+            while(nextseqnum < base + WINDOW_SIZE && !buffer.empty()){
+                //get the message
+                packet pac = buffer.front();
+                buffer.pop();
+                int place = nextseqnum % WINDOW_SIZE;
+                //fill the information of nextseqnum and checksum
+                make_pkt2(nextseqnum,pac);
+                window[place] = pac;
+                //std::cout<<"send message at time "<<GetSimulationTime()<<std::endl;
+                Sender_ToLowerLayer(window + place);
+                if(base == nextseqnum) Sender_StartTimer(TIME_OUT);
+                nextseqnum++;
+            }
         }else{
-            Sender_StartTimer(TIME_OUT);
+            if(oldBase != base){
+                Sender_StartTimer(TIME_OUT);
+            }
         }
+    }else{
+       //std::cout<<"the recive ACK corrupt"<<std::endl;
     }
-    if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
-    mtx.unlock();
+    //if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
 }
 
 /* event handler, called when the timer expires */
 void Sender_Timeout()
 {
-    mtx.lock();
-    if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
-    std::cout<<"time out"<<std::endl;
+    //if(lockDebug) std::cout<<"get lock at "<<GetSimulationTime()<<std::endl;
+    //std::cout<<"time out "<<"base = "<<base<<"nextseqnum = "<<nextseqnum<<std::endl;
     Sender_StartTimer(TIME_OUT);
     for(int i = base; i < nextseqnum; i++){
         int offset = i % WINDOW_SIZE;
         Sender_ToLowerLayer(window + offset);
     }
-    if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
-    mtx.unlock();
+    //if(lockDebug) std::cout<<"release lock at "<<GetSimulationTime()<<std::endl;
 }
 
